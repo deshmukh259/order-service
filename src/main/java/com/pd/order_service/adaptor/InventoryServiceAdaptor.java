@@ -12,6 +12,7 @@ public class InventoryServiceAdaptor implements InventoryService {
 
 
     private final RestTemplate restTemplate;
+
     @Value("${inventory.url}")
     private String inventoryUrl;
 
@@ -38,7 +39,7 @@ public class InventoryServiceAdaptor implements InventoryService {
     @Override
     public ItemDto getAvailableItems(String itemName) {
 
-        String url = inventoryUrl + "/api/available-items/" + itemName;
+        String url = inventoryUrl + "/api/available-items/name/" + itemName;
         ResponseEntity<ItemDto> forEntity = restTemplate.getForEntity(url, ItemDto.class);
         return forEntity.getBody();
     }

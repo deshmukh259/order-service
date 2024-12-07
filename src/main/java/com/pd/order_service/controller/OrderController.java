@@ -26,7 +26,7 @@ public class OrderController {
 
     }
 
-    @GetMapping(value = "/api/orders")
+    @GetMapping(value = "/api/orders/{orderId}")
     public OrderDetailsDto getOrderDetail(@PathVariable int orderId) throws OrderException {
 
         if (orderId < 1)
@@ -36,7 +36,7 @@ public class OrderController {
 
     }
 
-    @GetMapping(value = "/api/orders")
+    @PostMapping(value = "/api/orders")
     public List<OrderDetailsDto> createOrder(@RequestBody OrderDto orderDto) {
 
         return orderService.createOrder(orderDto);

@@ -1,17 +1,18 @@
 package com.pd.order_service.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pd.order_service.adaptor.InventoryService;
-import com.pd.order_service.dto.ItemDto;
-import com.pd.order_service.dto.OrderDetailsDto;
-import com.pd.order_service.dto.OrderDto;
+import com.pd.order_service.adaptor.KafkaAdaptor;
+import com.pd.order_service.dto.*;
 import com.pd.order_service.entity.OrderEntity;
 import com.pd.order_service.entity.OrderItemEntity;
 import com.pd.order_service.entity.OrderStatusEnum;
 import com.pd.order_service.repository.OrderRepository;
 import org.modelmapper.ModelMapper;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -23,13 +24,27 @@ public class OrderServiceImpl implements OrderService {
 
     private final InventoryService inventoryService;
 
+    private final ObjectMapper objectMapper;
+
 
     private final ModelMapper modelMapper;
 
-    public OrderServiceImpl(OrderRepository orderRepository, InventoryService inventoryService, ModelMapper modelMapper) {
+    private final String inventoryTopic;
+
+    private final String shipmentTopic;
+
+    private final KafkaAdaptor kafkaAdaptor;
+
+    public OrderServiceImpl(OrderRepository orderRepository, InventoryService inventoryService, ObjectMapper objectMapper,
+                            ModelMapper modelMapper, @Value("${kafka.topic.inventory}") String inventoryTopic,
+                            @Value("${kafka.topic.shipment}") String shipmentTopic, KafkaAdaptor kafkaAdaptor) {
         this.orderRepository = orderRepository;
         this.inventoryService = inventoryService;
+        this.objectMapper = objectMapper;
         this.modelMapper = modelMapper;
+        this.inventoryTopic = inventoryTopic;
+        this.shipmentTopic = shipmentTopic;
+        this.kafkaAdaptor = kafkaAdaptor;
     }
 
     @Override
@@ -50,24 +65,31 @@ public class OrderServiceImpl implements OrderService {
     @Override
     public List<OrderDetailsDto> createOrder(OrderDto orderDto) {
 
-        List<ItemDto> itemDtoList = new ArrayList<>();
         //check available quantity
-        OrderEntity order = new OrderEntity.OrderEntityBuilder()
-                .address(orderDto.getAddress())
-                .userName(orderDto.getUserName())
-                .status(OrderStatusEnum.ORDERED)
-                .cancellable(true)
-                .build();
 
+        OrderEntity order = new OrderEntity();
+        order.setAddress(orderDto.getAddress());
+        order.setUserName(orderDto.getUserName());
+        order.setStatus(OrderStatusEnum.ORDERED);
+        order.setCancellable(true);
+
+        OrderEntity finalOrder = order;
         List<OrderItemEntity> orderItemEntities = orderDto.getItems().stream().map(item -> {
             ItemDto itemDto = inventoryService.getAvailableItems(item.getItemName());
             OrderItemEntity orderItemEntity = new OrderItemEntity();
             if ((itemDto.getTotalQty() - itemDto.getSoldQty()) >= item.getQuantity()) {
-                orderItemEntity.setOrderEntity(order);
+                orderItemEntity.setOrderEntity(finalOrder);
                 orderItemEntity.setItemName(item.getItemName());
                 orderItemEntity.setQuantity(item.getQuantity());
                 orderItemEntity.setStatus(OrderStatusEnum.ORDERED);
                 orderItemEntity.setFinalCost((double) itemDto.getPrice());
+                Double totalCost = finalOrder.getTotalCost();
+                if (totalCost == null || totalCost == 0) {
+                    totalCost = (double) itemDto.getPrice() * item.getQuantity();
+                } else {
+                    totalCost += (double) itemDto.getPrice() * item.getQuantity();
+                }
+                finalOrder.setTotalCost(totalCost);
             } else {
                 throw new RuntimeException("Item Quantity not to sold : " + itemDto.getItemName());
             }
@@ -77,8 +99,47 @@ public class OrderServiceImpl implements OrderService {
         order = orderRepository.save(order);
         System.out.println("order created ");
 
-        kafkaAdaptor.sendEvent();
+        String orderEvent = null;
+        String shipmentEvent = null;
+        try {
+            orderEvent = createInventoryEvent(order);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
+        try {
+            shipmentEvent = createShipmentEvent(order);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e); //shipment topic need to add address user details, and item details
+        }
+        kafkaAdaptor.sendMessage(inventoryTopic, orderEvent);
+        kafkaAdaptor.sendMessage(shipmentTopic, shipmentEvent);
 
         return List.of();
     }
+
+    private String createShipmentEvent(OrderEntity order) throws JsonProcessingException {
+
+        InventoryMessage inventoryMessage = new InventoryMessage();
+        for (OrderItemEntity orderItemEntity : order.getOrderItemEntityList()) {
+            inventoryMessage.getItems().add(new Items(orderItemEntity.getItemName(), orderItemEntity.getQuantity()));
+        }
+        return objectMapper.writeValueAsString(inventoryMessage);
+
+    }
+
+    private String createInventoryEvent(OrderEntity order) throws JsonProcessingException {
+
+
+        InventoryMessage inventoryMessage = new InventoryMessage();
+        for (OrderItemEntity orderItemEntity : order.getOrderItemEntityList()) {
+            inventoryMessage.getItems().add(new Items(orderItemEntity.getItemName(), orderItemEntity.getQuantity()));
+        }
+        return objectMapper.writeValueAsString(inventoryMessage);
+
+//        inventory -> minus available qnty ->itemname -> sold qnty, [list]
+//
+//        shipment item ids orderid->qnty -> itemname -> sold qnty, [list]
+//        address
+    }
 }
+
